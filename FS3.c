@@ -1,5 +1,6 @@
 #include <SPI.h>
 #include <RF24.h>
+#include <Arduino.h>
 
 // NRF24L01 pins
 #define CE_PIN 7
@@ -29,6 +30,7 @@ void setup() {
 
   // Initialisation NRF24
   radio.begin();
+  delay(200);
   radio.openReadingPipe(1, 0xF0F0F0F0E1LL);
   radio.startListening();
 
@@ -50,7 +52,8 @@ void loop() {
     setLED(msg.prio);
 
     // Activer buzzer
-    digitalWrite(BUZZER_PIN, HIGH);
+    // digitalWrite(BUZZER_PIN, HIGH); // 
+    PROBLEME ICI , IL FAUT CREER UNE FONCTION ALERTE QUI VA FAIRE SONNER LE BUZZER ET CLIGNOTER LES LEDS
   }
 
   // Vérifier si bouton appuyé pour arrêter les alertes
