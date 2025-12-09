@@ -7,39 +7,44 @@
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLEz
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// --- Paramètres Encodeur ---
+// --- Paramètres Matériel ---
 const int brocheEncodeur_A = 3; 
 const int brocheEncodeur_B = 4; 
-const int brocheBouton_Encodeur_SW = 2; 
+const int brocheBouton_Encodeur = 2; // Bouton 1 (Ajout lettre)
+const int brocheBouton_Valider = A6; // Bouton 2 (Validation / Effacement Long)
+const int brocheLED_Validation = 5;  // LED
 
-// --- Liste des caractères (ASCII étendu pour Adafruit GFX) ---z
-// \x82=é, \x85=à, \x87=ç, \x88=ê, \x97=ù (Codes CP437 standard)z
-// '<' servira de BACKSPACE (effacer)
-// '>' servira de ENTER (valider)
-const char* listeCaracteres = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456z82\x85\x87\x88\x97<>";
-const int tailleListeCaracteres = 44; // Nombre réel de "symbolez
+// --- Liste des caractères ---
+const char* listeCaracteres = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,!?@\x82\x85\x87\x88\x97<";
+const int tailleListeCaracteres = 43; 
 
 // --- Variables Globales ---
 volatile int indexCaractereSelectionne = 0; 
 int dernierIndexCaractereAffiche = -1;
 
-// Structure du message
+// Sensibilité Encodeur
+volatile int compteurBrutEncodeur = 0; 
+const int SENSIBILITE = 2; 
+
 struct Message {
-  char texte[101]; // Taille 101 pour EF1 (100 chars + null termz
+  char texte[101]; 
   int priorite;    
 };
-
 Message monMessage; 
 int positionCurseurMessage = 0;
 
-// Gestion du bouton
-int etatPrecedentBouton = HIGH;
-long dernierTempsDebounce = 0;
-const long delaiDebounce = 50;
+// Variables Gestion Boutons
+long dernierTempsDebounceEnc = 0;
+int etatPrecedentBoutonEnc = HIGH;
+int etatPrecedentBoutonVal = HIGH;
+unsigned long tempsDebutAppuiVal = 0;
+bool appuiLongTraite = false; 
 
-// États du système pour gérer le flux (Saisie -> Priorité -> Fiz
+const long delaiDebounce = 50;
+const long DUREE_APPUI_LONG = 1000; 
+
 enum EtatSysteme {
   SAISIE_TEXTE,
   CHOIX_PRIORITE,
@@ -47,34 +52,60 @@ enum EtatSysteme {
 };
 EtatSysteme etatActuel = SAISIE_TEXTE;
 
-// --- Interruptions ---
+// --- Interruption (ISR) ---
 void gererRotationEncodeur() {
-  if (digitalRead(brocheEncodeur_A) == digitalRead(brocheEncodeuz
-    indexCaractereSelectionne++;
-  } else {
-    indexCaractereSelectionne--;
+  static unsigned long dernierTempsInterruption = 0;
+  unsigned long tempsActuel = millis();
+
+  if (tempsActuel - dernierTempsInterruption > 5) {
+    if (digitalRead(brocheEncodeur_A) == digitalRead(brocheEncodeur_B)) {
+      compteurBrutEncodeur++;
+    } else {
+      compteurBrutEncodeur--;
+    }
+
+    if (compteurBrutEncodeur >= SENSIBILITE) {
+      indexCaractereSelectionne++;
+      compteurBrutEncodeur = 0; 
+    } 
+    else if (compteurBrutEncodeur <= -SENSIBILITE) {
+      indexCaractereSelectionne--;
+      compteurBrutEncodeur = 0; 
+    }
+    dernierTempsInterruption = tempsActuel;
   }
 }
 
+// --- Fonctions (Déclarations) ---
+void gererLimitesIndex(int max);
+void gererLimitesPriorite();
+void gererAffichageSaisie();
+void gererAffichagePriorite();
+void afficherEcranValidation(); // <-- Celle qu'on modifie
+void clignoterLED();
+void resetSysteme();
+void gererBoutonSelectionLettre(); 
+void gererBoutonValidation();      
+
 // --- Setup ---
 void setup() {
-  pinMode(10, OUTPUT);
   Serial.begin(9600);
   
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
-    Serial.println(F("Erreur SSD1306"));
     for(;;);
   }
-  
+  display.cp437(true); 
+
   pinMode(brocheEncodeur_A, INPUT_PULLUP);
   pinMode(brocheEncodeur_B, INPUT_PULLUP);
-  pinMode(brocheBouton_Encodeur_SW, INPUT_PULLUP);
+  pinMode(brocheBouton_Encodeur, INPUT_PULLUP);
+  pinMode(brocheLED_Validation, OUTPUT);
+  digitalWrite(brocheLED_Validation, LOW);
   
-  attachInterrupt(digitalPinToInterrupt(brocheEncodeur_A), gererzodeur, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(brocheEncodeur_A), gererRotationEncodeur, CHANGE);
 
-  // Initialisation du message
   memset(monMessage.texte, 0, sizeof(monMessage.texte));
-  monMessage.priorite = 2; // Par défaut Normal
+  monMessage.priorite = 2; 
 
   display.clearDisplay();
   display.display();
@@ -82,7 +113,6 @@ void setup() {
 
 // --- Loop ---
 void loop() {
-  // 1. Gestion de la logique selon l'état
   switch (etatActuel) {
     case SAISIE_TEXTE:
       gererLimitesIndex(tailleListeCaracteres);
@@ -90,74 +120,180 @@ void loop() {
       break;
       
     case CHOIX_PRIORITE:
-      // Ici l'encodeur change la priorité (1 à 3)
       gererLimitesPriorite();
       gererAffichagePriorite();
       break;
-
+      
     case MESSAGE_PRET:
-      afficherResume();
-      // Ici, on pourrait envoyer via NRF24 puis remettre à zéroz
-      delay(2000); 
-      resetSysteme();
+      // 1. Afficher le RÉSUMÉ DU MESSAGE
+      afficherEcranValidation(); 
+      
+      // 2. Clignoter
+      clignoterLED();            
+      
+      // 3. Pause lecture
+      delay(2500);               
+      
+      // 4. Reset
+      resetSysteme();            
       break;
   }
 
-  // 2. Gestion du bouton (action commune)
-  gererBouton();
+  if (etatActuel != MESSAGE_PRET) {
+    gererBoutonSelectionLettre(); 
+    gererBoutonValidation();   
+  }
   
   delay(10); 
 }
 
-// --- Fonctions Utilitaires ---
+// --- Nouvelle Logique : Affichage complet du message ---
+void afficherEcranValidation() {
+  display.clearDisplay();
+  
+  // Titre en haut
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print(F(">> ENVOI VALIDE <<"));
+
+  // Affichage de la priorité
+  display.setCursor(0, 12);
+  display.print(F("Prio: "));
+  if (monMessage.priorite == 1) display.print(F("URGENT !!!"));
+  else if (monMessage.priorite == 2) display.print(F("Normal"));
+  else display.print(F("Basse"));
+
+  // Ligne de séparation
+  display.drawLine(0, 22, 128, 22, SSD1306_WHITE);
+
+  // Le Message complet (Adafruit gère le retour à la ligne auto)
+  display.setCursor(0, 26);
+  display.println(monMessage.texte);
+
+  display.display();
+}
+
+void clignoterLED() {
+  digitalWrite(brocheLED_Validation, LOW);
+  delay(100);
+  for(int i=0; i<3; i++) {
+    digitalWrite(brocheLED_Validation, HIGH); 
+    delay(200); 
+    digitalWrite(brocheLED_Validation, LOW);  
+    delay(200); 
+  }
+}
+
+// --- Reste de la logique (Boutons, etc.) ---
+void gererBoutonSelectionLettre() {
+  int etat = digitalRead(brocheBouton_Encodeur);
+  if (etat != etatPrecedentBoutonEnc && millis() - dernierTempsDebounceEnc > delaiDebounce) {
+    if (etat == LOW) { 
+      if (etatActuel == SAISIE_TEXTE) {
+        char carChoisi = listeCaracteres[indexCaractereSelectionne];
+        if (carChoisi == '<') { 
+           if (positionCurseurMessage > 0) {
+            positionCurseurMessage--;
+            monMessage.texte[positionCurseurMessage] = '\0';
+            dernierIndexCaractereAffiche = -1; 
+          }
+        } else {
+          if (positionCurseurMessage < 100) { 
+            monMessage.texte[positionCurseurMessage] = carChoisi;
+            positionCurseurMessage++;
+            monMessage.texte[positionCurseurMessage] = '\0';
+            dernierIndexCaractereAffiche = -1;
+          }
+        }
+      }
+      else if (etatActuel == CHOIX_PRIORITE) {
+        monMessage.priorite = indexCaractereSelectionne;
+        etatActuel = MESSAGE_PRET;
+      }
+    }
+    dernierTempsDebounceEnc = millis();
+  }
+  etatPrecedentBoutonEnc = etat;
+}
+
+void gererBoutonValidation() {
+  int lecture = analogRead(brocheBouton_Valider);
+  int etatActuelBouton = (lecture < 500) ? LOW : HIGH; 
+  unsigned long tempsMaintenant = millis();
+
+  if (etatActuelBouton == LOW && etatPrecedentBoutonVal == HIGH) {
+    tempsDebutAppuiVal = tempsMaintenant;
+    appuiLongTraite = false; 
+  }
+
+  if (etatActuelBouton == LOW && !appuiLongTraite) {
+    if (tempsMaintenant - tempsDebutAppuiVal >= DUREE_APPUI_LONG) {
+      if (etatActuel == SAISIE_TEXTE && positionCurseurMessage > 0) {
+        positionCurseurMessage--;
+        monMessage.texte[positionCurseurMessage] = '\0';
+        dernierIndexCaractereAffiche = -1; 
+        display.invertDisplay(true); delay(50); display.invertDisplay(false);
+      }
+      appuiLongTraite = true; 
+    }
+  }
+
+  if (etatActuelBouton == HIGH && etatPrecedentBoutonVal == LOW) {
+    if (!appuiLongTraite) {
+       if (etatActuel == SAISIE_TEXTE) {
+         etatActuel = CHOIX_PRIORITE;
+         indexCaractereSelectionne = 2; 
+         dernierIndexCaractereAffiche = -1;
+      }
+      else if (etatActuel == CHOIX_PRIORITE) {
+         monMessage.priorite = indexCaractereSelectionne;
+         etatActuel = MESSAGE_PRET;
+      }
+    }
+  }
+  etatPrecedentBoutonVal = etatActuelBouton;
+}
 
 void gererLimitesIndex(int max) {
-  if (indexCaractereSelectionne >= max) indexCaractereSelectionnz
-  if (indexCaractereSelectionne < 0) indexCaractereSelectionne =z
+  if (indexCaractereSelectionne >= max) indexCaractereSelectionne = 0;
+  if (indexCaractereSelectionne < 0) indexCaractereSelectionne = max - 1;
 }
 
 void gererLimitesPriorite() {
-  // On utilise l'index de l'encodeur mais on le contraint entrez
-  // Petite astuce : on mappe l'index modulo 3
-  // Mais pour faire simple, on réinitialise l'index à l'entrée z
-  if (indexCaractereSelectionne > 3) indexCaractereSelectionne =z
-  if (indexCaractereSelectionne < 1) indexCaractereSelectionne =z
+  if (indexCaractereSelectionne > 3) indexCaractereSelectionne = 1;
+  if (indexCaractereSelectionne < 1) indexCaractereSelectionne = 3;
 }
 
 void gererAffichageSaisie() {
-  if (indexCaractereSelectionne != dernierIndexCaractereAffiche)z
+  if (indexCaractereSelectionne != dernierIndexCaractereAffiche) {
     display.clearDisplay();
-    
-    // Titre
+    int indexPrec = (indexCaractereSelectionne - 1 + tailleListeCaracteres) % tailleListeCaracteres;
+    int indexSuiv = (indexCaractereSelectionne + 1) % tailleListeCaracteres;
+
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0,0);
-    display.print(F("Ecrire (len:"));
-    display.print(positionCurseurMessage);
-    display.print(F(")"));
+    display.setCursor(10, 12); display.print(listeCaracteres[indexPrec]);
+    display.setCursor(110, 12); display.print(listeCaracteres[indexSuiv]);
 
-    // Caractère sélectionné (Gros)
     display.setTextSize(2);
-    display.setCursor(0, 10);
-    char car = listeCaracteres[indexCaractereSelectionne];
-    display.print(F("["));
-    display.print(car);
-    display.print(F("]"));
-    
-    // Légende pour Backspace et Enter
-    display.setTextSize(1);
-    display.setCursor(40, 15);
-    if(car == '<') display.print(F("Effacer"));
-    else if(car == '>') display.print(F("Valider"));
+    display.setCursor(58, 8);
+    display.print(listeCaracteres[indexCaractereSelectionne]);
 
-    // Le message en cours
-    display.setCursor(0, 35);
+    display.setTextSize(1);
+    display.setCursor(40, 12); display.print(F(">"));
+    display.setCursor(80, 12); display.print(F("<"));
+
+    display.setCursor(0, 26); 
+    display.print(F("BTN2: Court=OK Long=DEL")); 
+
+    display.drawLine(0, 36, 128, 36, SSD1306_WHITE);
+    display.setCursor(0, 40);
     display.println(monMessage.texte);
-    
-    // Curseur visuel "_"
-    if (positionCurseurMessage < 100) {
-       display.print("_");
-    }
+    if (positionCurseurMessage < 100) display.print("_");
+
+    display.setTextSize(1);
+    display.setCursor(0, 0); display.print(positionCurseurMessage);
 
     display.display();
     dernierIndexCaractereAffiche = indexCaractereSelectionne;
@@ -165,76 +301,24 @@ void gererAffichageSaisie() {
 }
 
 void gererAffichagePriorite() {
-   if (indexCaractereSelectionne != dernierIndexCaractereAffichez
+   if (indexCaractereSelectionne != dernierIndexCaractereAffiche) {
     display.clearDisplay();
     display.setTextSize(1);
     display.setCursor(0,0);
-    display.println(F("EF3: Priorite ?"));
-    
+    display.println(F("CHOIX PRIORITE"));
     display.setTextSize(2);
-    display.setCursor(0,25);
+    display.setCursor(10,25);
     
-    if (indexCaractereSelectionne == 1) display.print(F("1: URGEz
-    else if (indexCaractereSelectionne == 2) display.print(F("2:z
-    else display.print(F("3: BASSE"));
+    if (indexCaractereSelectionne == 1) display.print(F("<URGENT>"));
+    else if (indexCaractereSelectionne == 2) display.print(F("<NORMAL>"));
+    else display.print(F("<BASSE>"));
 
+    display.setTextSize(1);
+    display.setCursor(0,50);
+    display.print(F("Btn2 Court pour OK"));
     display.display();
     dernierIndexCaractereAffiche = indexCaractereSelectionne;
    }
-}
-
-void afficherResume() {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0,0);
-  display.println(F("Message Pret!"));
-  display.print(F("Prio: ")); display.println(monMessage.prioritz
-  display.println(F("---"));
-  display.println(monMessage.texte);
-  display.display();
-}
-
-void gererBouton() {
-  int etatActuelBouton = digitalRead(brocheBouton_Encodeur_SW);
-
-  if (etatActuelBouton != etatPrecedentBouton && millis() - dernzounce > delaiDebounce) {
-    if (etatActuelBouton == LOW) { // Appui validé
-      
-      if (etatActuel == SAISIE_TEXTE) {
-        char carChoisi = listeCaracteres[indexCaractereSelectionz
-        
-        // Gestion BACKSPACE (<)
-        if (carChoisi == '<') {
-          if (positionCurseurMessage > 0) {
-            positionCurseurMessage--;
-            monMessage.texte[positionCurseurMessage] = '\0';
-            dernierIndexCaractereAffiche = -1; // Force rafraichz
-          }
-        }
-        // Gestion VALIDATION (>)
-        else if (carChoisi == '>') {
-           etatActuel = CHOIX_PRIORITE;
-           indexCaractereSelectionne = 2; // Par défaut prioritéz
-           dernierIndexCaractereAffiche = -1;
-        }
-        // Ajout caractère normal
-        else {
-          if (positionCurseurMessage < 100) { // EF1
-            monMessage.texte[positionCurseurMessage] = carChoisiz
-            positionCurseurMessage++;
-            monMessage.texte[positionCurseurMessage] = '\0';
-            dernierIndexCaractereAffiche = -1;
-          }
-        }
-      } 
-      else if (etatActuel == CHOIX_PRIORITE) {
-        monMessage.priorite = indexCaractereSelectionne;
-        etatActuel = MESSAGE_PRET;
-      }
-    }
-    dernierTempsDebounce = millis();
-  }
-  etatPrecedentBouton = etatActuelBouton;
 }
 
 void resetSysteme() {
@@ -243,4 +327,5 @@ void resetSysteme() {
   etatActuel = SAISIE_TEXTE;
   indexCaractereSelectionne = 0;
   dernierIndexCaractereAffiche = -1;
+  compteurBrutEncodeur = 0;
 }
