@@ -1,92 +1,74 @@
-#include <SPI.h>
 #include <RF24.h>
-#include <Arduino.h>
+#include <stdio.h>
 
-// NRF24L01 pins
 #define CE_PIN 7
 #define CSN_PIN 8
+#define BUZZER_PIN 10
+#define STOP_BTN_PIN 2   // bouton pour arrêter les alertes
+
 RF24 radio(CE_PIN, CSN_PIN);
 
-// Buzzer
-#define BUZZER_PIN 10
-
-// LED RGB
-#define RED_PIN 5
-#define GREEN_PIN 6
-#define BLUE_PIN 9
-
-// Bouton d'arrêt
-#define BUTTON_PIN 2
-
-// Variables
+// Structure du message
 struct Message {
+  char pseudo[20];
   char text[100];
-  int prio; // 1=Urgent, 2=Normal, 3=Basse
+  int prio; // 1 = faible, 2 = moyenne, 3 = haute
 };
 Message msg;
 
-void setup() {
-  Serial.begin(9600);
+int message_recu = 0; //  pour savoir qu'un message est arrivé
 
-  // Initialisation NRF24
+// --- Fonction pour allumer la LED selon la priorité ---
+void setLED(int prio) {
+  switch(prio) {
+    case 1: // faible → vert
+      analogWrite(5, 0);   // rouge
+      analogWrite(6, 255); // vert
+      analogWrite(9, 0);   // bleu
+      break;
+    case 2: // moyenne → jaune
+      analogWrite(5, 255); // rouge
+      analogWrite(6, 255); // vert
+      analogWrite(9, 0);   // bleu
+      break;
+    case 3: // haute → rouge
+      analogWrite(5, 255); // rouge
+      analogWrite(6, 0);   // vert
+      analogWrite(9, 0);   // bleu
+      break;
+    default: // éteinte
+      analogWrite(5, 0);
+      analogWrite(6, 0);
+      analogWrite(9, 0);
+      break;
+  }
+}
+
+void setup() {
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(STOP_BTN_PIN, INPUT_PULLUP); // bouton avec résistance pull-up
   radio.begin();
-  delay(200);
   radio.openReadingPipe(1, 0xF0F0F0F0E1LL);
   radio.startListening();
-
-  // Initialisation pins
-  pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(RED_PIN, OUTPUT);
-  pinMode(GREEN_PIN, OUTPUT);
-  pinMode(BLUE_PIN, OUTPUT);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
 }
 
 void loop() {
-  // Vérifier la réception d'un message
+  // --- Détection du message ---
   if (radio.available()) {
     radio.read(&msg, sizeof(msg));
-    Serial.println(msg.text);
-
-    // Allumer LED RGB selon la priorité
-    setLED(msg.prio);
-
-    // Activer buzzer
-    // digitalWrite(BUZZER_PIN, HIGH); // 
-    PROBLEME ICI , IL FAUT CREER UNE FONCTION ALERTE QUI VA FAIRE SONNER LE BUZZER ET CLIGNOTER LES LEDS
+    message_recu = 1;
   }
 
-  // Vérifier si bouton appuyé pour arrêter les alertes
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    stopAlerts();
+  // --- Traitement du message ---
+  if (message_recu == 1) {
+    setLED(msg.prio);           // allume la LED selon priorité
+    digitalWrite(BUZZER_PIN, HIGH); // allume le buzzer
+    message_recu = 0;               // réinitialise 
   }
-}
 
-// Fonction pour régler LED selon priorité
-void setLED(int prio) {
-  switch(prio) {
-    case 1: // Urgent
-      analogWrite(RED_PIN, 255);
-      analogWrite(GREEN_PIN, 0);
-      analogWrite(BLUE_PIN, 0);
-      break;
-    case 2: // Normal
-      analogWrite(RED_PIN, 255);
-      analogWrite(GREEN_PIN, 255);
-      analogWrite(BLUE_PIN, 0);
-      break;
-    case 3: // Basse
-      analogWrite(RED_PIN, 0);
-      analogWrite(GREEN_PIN, 0);
-      analogWrite(BLUE_PIN, 255);
-      break;
+  // --- Arrêt des alertes si l'utilisateur appuie sur le bouton ---
+  if (digitalRead(STOP_BTN_PIN) == LOW) { // bouton pressé
+    digitalWrite(BUZZER_PIN, LOW);        // éteint le buzzer
+    setLED(0);                             // éteint la LED
   }
-}
-
-// Fonction pour arrêter les alertes
-void stopAlerts() {
-  digitalWrite(BUZZER_PIN, LOW);
-  analogWrite(RED_PIN, 0);
-  analogWrite(GREEN_PIN, 0);
-  analogWrite(BLUE_PIN, 0);
 }
