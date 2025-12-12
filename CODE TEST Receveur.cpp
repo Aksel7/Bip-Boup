@@ -18,6 +18,16 @@ const byte adresse[6] = "PIPE1";
 // Ecran OLED
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
+// Affiche les caractères de la case 1 à 31 sur l'OLED
+void afficher_paquet_sur_oled(char p[]) {
+  for (int i = 1; i < 32; i++) {
+    // Si la case n'est pas vide (0), on l'affiche
+    if (p[i] != 0) {
+      display.print(p[i]);
+    }
+  }
+}
+
 void setup() {
   // 1. Démarrage Ecran
   // Si l'écran reste noir, essaie 0x3D au lieu de 0x3C
@@ -71,16 +81,5 @@ void loop() {
 
     // 3. On met à jour l'écran pour que le texte apparaisse
     display.display();
-  }
-}
-
-// --- FONCTION D'AIDE ---
-// Affiche les caractères de la case 1 à 31 sur l'OLED
-void afficher_paquet_sur_oled(char p[]) {
-  for (int i = 1; i < 32; i++) {
-    // Si la case n'est pas vide (0), on l'affiche
-    if (p[i] != 0) {
-      display.print(p[i]);
-    }
   }
 }
