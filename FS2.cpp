@@ -1,6 +1,6 @@
 /*
-   PROJET : Emetteur NRF24 - Version Débutant
-   BUT    : Envoyer un Pseudo et un Message long morceau par morceau.
+    PROJET : Emetteur NRF24 - Version FINALE (Avec Confirmation)
+    BUT    : Envoyer un Pseudo et un Message long, et vérifier si ça arrive.
 */
 
 #include <SPI.h>
@@ -19,82 +19,98 @@ const byte adresse[6] = "PIPE1";
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
 // --- LES DONNEES A ENVOYER ---
-// On utilise "String" car c'est plus facile pour un débutant
 String mon_pseudo = "Passion_Electro";
-String mon_message = "Ceci est un test facile. Je decoupe ce message en petits morceaux avec une boucle for simple !";
+String mon_message = "Ceci est un test avec confirmation. Si tu vois OK, c'est que le recepteur a bien recu !";
 
 void setup() {
-  pinMode(10,OUTPUT);
+  pinMode(10,OUTPUT); // Nécessaire pour le SPI sur certains Arduinos
+  
   // 1. Démarrage Ecran
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // Parfois 0x3D
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
+    // Si l'écran ne s'allume pas, on boucle ici
+    for(;;); 
+  }
+  
   display.clearDisplay();
   display.setTextColor(WHITE);
   display.setTextSize(1);
   
   // 2. Démarrage Radio
   radio.begin();
+  
+  // Vérification si le module radio est bien branché
+  if (!radio.isChipConnected()) {
+    display.setCursor(0,0);
+    display.println("Erreur Radio !");
+    display.println("Verifiez cablage.");
+    display.display();
+    while(1);
+  }
+
   radio.openWritingPipe(adresse);
   radio.setPALevel(RF24_PA_MIN);
-  radio.stopListening(); // On est l'émetteur
+  radio.stopListening(); // Mode Emetteur
 
   // Petit message d'accueil
   display.setCursor(0, 0);
-  display.println("Systeme Pret !");
+  display.println("Emetteur Pret !");
   display.display();
   delay(2000);
 }
 
-// --- FONCTION MAGIQUE SIMPLIFIEE ---
-// Cette fonction prend un texte et une lettre type ('P' ou 'M')
-// et s'occupe de tout découper et envoyer.
+// --- FONCTION D'ENVOI INTELLIGENTE ---
 void envoyer_le_texte(char type, String texte_a_envoyer) {
   
   int longueur_totale = texte_a_envoyer.length();
-  int curseur = 0; // Où on en est dans le texte (lettre 0, 10, 20...)
+  int curseur = 0; 
 
   // Tant qu'on n'a pas tout envoyé...
   while (curseur < longueur_totale) {
     
-    // 1. On prépare un "paquet" vide de 32 cases
+    // 1. Préparation du paquet
     char paquet[32]; 
-    
-    // 2. La case 0 sert à dire ce que c'est ('P' ou 'M')
-    paquet[0] = type;
+    paquet[0] = type; // 'P' ou 'M'
 
-    // 3. On remplit les 31 cases restantes avec une boucle simple
-    // On va de 1 à 31 (car 0 est déjà pris)
+    // Remplissage des 31 autres cases
     for (int i = 1; i < 32; i++) {
-      
       if (curseur < longueur_totale) {
-        // On prend la lettre du texte et on la met dans le paquet
         paquet[i] = texte_a_envoyer[curseur];
-        curseur++; // On passe à la lettre suivante du texte global
+        curseur++; 
       } else {
-        // Si le texte est fini, on met un 0 (vide)
-        paquet[i] = 0; 
+        paquet[i] = 0; // Nettoyage de la fin
       }
     }
 
-    // 4. On envoie le paquet par la radio
-    radio.write(&paquet, sizeof(paquet));
+    // 2. ENVOI AVEC VERIFICATION
+    // radio.write renvoie 'true' si le récepteur a dit "J'ai reçu !"
+    bool accuse_reception = radio.write(&paquet, sizeof(paquet));
 
-    // 5. On affiche sur l'écran ce qu'on fait
+    // 3. Affichage du statut
     display.clearDisplay();
     display.setCursor(0, 0);
     
     if (type == 'P') {
-      display.println("Envoi du PSEUDO...");
+      display.println(">> Envoi PSEUDO");
       display.println(mon_pseudo);
     } else {
-      display.println("Envoi du MESSAGE...");
-      // Affiche : "Reste : 50 caracteres"
-      display.print("Reste a envoyer: ");
+      display.println(">> Envoi MESSAGE");
+      display.print("Reste: ");
       display.println(longueur_totale - curseur);
     }
+    
+    display.println("-----");
+    display.print("Statut Radio: ");
+    
+    if (accuse_reception) {
+       display.println("OK"); // Succès
+    } else {
+       display.println("X");  // Échec
+    }
+
     display.display();
 
-    // Petite pause pour laisser le temps de voir
-    delay(100);
+    // Petite pause visuelle
+    delay(150);
   }
 }
 
@@ -102,17 +118,17 @@ void loop() {
   // Etape 1 : Envoyer le Pseudo
   envoyer_le_texte('P', mon_pseudo);
   
-  delay(1000); // Pause
+  delay(1000); // Pause entre pseudo et message
 
   // Etape 2 : Envoyer le Message
   envoyer_le_texte('M', mon_message);
 
-  // Fin
+  // Fin de la séquence
   display.clearDisplay();
   display.setCursor(0, 0);
-  display.println("Transmission FINIE");
-  display.println("Attente...");
+  display.println("Message termine.");
+  display.println("Pause de 5 sec...");
   display.display();
   
-  delay(5000); // On attend 5 secondes avant de recommencer
+  delay(5000); 
 }

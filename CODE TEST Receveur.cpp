@@ -22,6 +22,7 @@ void afficher_paquet_sur_oled(char p[]) {
 }
 
 void setup() {
+  pinMode(10,OUTPUT); // Nécessaire pour le SPI sur certains Arduinos
   // Ecran
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { for(;;); }
   display.clearDisplay();
