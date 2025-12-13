@@ -1,85 +1,72 @@
 /*
-    PROJET : Récepteur NRF24 - Version OLED
-    BUT    : Recevoir Pseudo et Message et les afficher proprement sur l'écran.
+    PROJET : Récepteur NRF24 - Version OLED Confirmée
+    BUT    : Recevoir et accuser réception automatiquement.
 */
 
-#include <SPI.h>
 #include <RF24.h>
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 
 // --- CONFIGURATION ---
-// Radio
 #define PIN_CE  7
 #define PIN_CSN 8
 RF24 radio(PIN_CE, PIN_CSN);
 const byte adresse[6] = "PIPE1";
 
-// Ecran OLED
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
-// Affiche les caractères de la case 1 à 31 sur l'OLED
 void afficher_paquet_sur_oled(char p[]) {
   for (int i = 1; i < 32; i++) {
-    // Si la case n'est pas vide (0), on l'affiche
-    if (p[i] != 0) {
-      display.print(p[i]);
-    }
+    if (p[i] != 0) display.print(p[i]);
   }
 }
 
 void setup() {
-  // 1. Démarrage Ecran
-  // Si l'écran reste noir, essaie 0x3D au lieu de 0x3C
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C); 
+  // Ecran
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { for(;;); }
   display.clearDisplay();
   display.setTextColor(WHITE);
   display.setTextSize(1);
   
-  // Message de bienvenue
   display.setCursor(0, 0);
-  display.println("Recepteur Pret...");
-  display.println("En attente radio");
+  display.println("Recepteur Actif.");
   display.display();
 
-  // 2. Démarrage Radio
+  // Radio
   radio.begin();
+  if (!radio.isChipConnected()) {
+    display.println("Erreur Radio !");
+    display.display();
+    while (1); 
+  }
+  
   radio.openReadingPipe(0, adresse);
   radio.setPALevel(RF24_PA_MIN);
-  radio.startListening(); // Mode écoute activé
+  radio.startListening(); 
 }
 
 void loop() {
   if (radio.available()) {
     
-    // 1. On récupère le paquet
     char paquet[32] = "";
     radio.read(&paquet, sizeof(paquet));
+    // Note : Au moment où .read() est fait, le module a DEJA envoyé 
+    // l'accusé de réception à l'émetteur automatiquement.
     
-    char type = paquet[0]; // 'P' ou 'M'
+    char type = paquet[0]; 
 
-    // 2. GESTION DE L'AFFICHAGE
-
-    // CAS 1 : C'est le PSEUDO (Début de transmission)
     if (type == 'P') {
-      display.clearDisplay(); // On efface tout pour le nouveau message
+      display.clearDisplay();
       display.setCursor(0, 0);
-      
-      display.print("DE: "); // "De la part de :"
-      afficher_paquet_sur_oled(paquet); // Affiche le nom
-      
-      display.println();        // Saut de ligne
-      display.println("-----"); // Petite barre de séparation
-      // Le curseur est maintenant prêt en dessous pour le message
+      display.print("DE: "); 
+      afficher_paquet_sur_oled(paquet); 
+      display.println();        
+      display.println("-----"); 
     }
-    
-    // CAS 2 : C'est le MESSAGE (Suite du texte)
     else if (type == 'M') {
-      // On continue d'écrire là où le curseur s'est arrêté
       afficher_paquet_sur_oled(paquet);
     }
-
-    // 3. On met à jour l'écran pour que le texte apparaisse
+    
     display.display();
   }
 }
