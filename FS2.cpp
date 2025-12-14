@@ -42,13 +42,13 @@ void setup() {
   if (!radio.isChipConnected()) {
     display.setCursor(0,0);
     display.println("Erreur Radio !");
-    display.println("Verifiez cablage.");
+    display.println("Verifiez cablage."); // treès aléatoire aucune idée comment debug
     display.display();
     while(1);
   }
 
-  radio.openWritingPipe(adresse);
-  radio.setPALevel(RF24_PA_MIN);
+  radio.openWritingPipe(adresse); // adresse renseignée dans FS5
+  radio.setPALevel(RF24_PA_MIN); 
   radio.stopListening(); // Mode Emetteur
 
   // Petit message d'accueil
