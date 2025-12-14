@@ -25,7 +25,7 @@ const int addrCanal = 0; // Adresse mémoire dans l'Arduino
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
 // --- LES DONNEES A ENVOYER ---
-String mon_pseudo = "Jo";
+String pseudo = "Jo";
 String mon_message = "Ceci est un test avec confirmation. Si tu vois OK, c'est que le recepteur a bien recu !";
 
 void setup() {
@@ -117,7 +117,7 @@ void envoyer_le_texte(char type, String texte_a_envoyer) {
 
     if (type == 'P') {
       display.println(">> Envoi PSEUDO");
-      display.println(mon_pseudo);
+      display.println(pseudo);
     } else {
       display.println(">> Envoi MESSAGE");
       display.print("Reste: ");
@@ -142,7 +142,7 @@ void envoyer_le_texte(char type, String texte_a_envoyer) {
 
 void loop() {
   // Etape 1 : Envoyer le Pseudo
-  envoyer_le_texte('P', mon_pseudo);
+  envoyer_le_texte('P', pseudo);
   
   delay(1000); // Pause entre pseudo et message
 
