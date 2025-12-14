@@ -5,257 +5,284 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-//Configuration de l'écran OLED 
+// ============================================================
+// --- CONFIGURATION MATERIEL ---
+// ============================================================
+
+// Ecran OLED
 #define LARGEUR_ECRAN 128
 #define HAUTEUR_ECRAN 64
-#define OLED_ADDR 0x3C // Adresse I2C de l'écran, peut être 0x3D selon le modèle
+#define OLED_ADDR 0x3C 
 Adafruit_SSD1306 ecran(LARGEUR_ECRAN, HAUTEUR_ECRAN, &Wire, -1);
 
+// Module NRF24
+RF24 radio(7, 8); // Pins CE, CSN
 
+// Encodeur & Buzzer
+const int pinCLK = 3; 
+const int pinDT  = 4; 
+const int pinSW  = 2; 
+const int buzzer = 10; 
+const int pinBoutonRetour = A6; // Second bouton (sur A6)
 
-// Configuration du module NRF24 
-RF24 radio(7, 8); // Pins CE et CSN du module NRF24
+// ============================================================
+// --- VARIABLES GLOBALES ---
+// ============================================================
 
+volatile int dernierCLK = 0;
+volatile bool changement = false; 
 
-//  Encodeur rotatif et bouton
-const int pinCLK = 3; // Signal CLK de l'encodeur
-const int pinDT  = 4; // Signal DT de l'encodeur
-const int pinSW  = 2; // Bouton intégré de l'encodeur
-const int buzzer = 10; // Buzzer pour signal sonore
-
-
-
-volatile int dernierCLK = 0;  // Variable pour détecter le changement du signal CLK
-volatile bool changement = false; // Indique qu'une valeur a été modifiée
-
-
-
-// Modes de configuration 
+// Modes du menu
 enum Mode { CANAL, PSEUDO, BUZZER };
-Mode modeActuel = CANAL; // Mode par défaut au démarrage
+Mode modeActuel = CANAL; 
 
+// Paramètres
+int canal = 0;           
+char pseudo[11] = "";     // Tableau de caractères (plus stable que String)
+const int longueurMaxPseudo = 10; 
 
+char lettreActuelle = 'A'; 
+int indexLettre = 0;      
+const char lettresAutorisees[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,!?;:@#&+-*/";
 
-//Paramètres configurables 
-int canal = 0;           // Canal de communication NRF24 (0 à 125)
-String pseudo = "";      // Nom d'utilisateur
-const int longueurMaxPseudo = 10; // Nombre max de caractères du pseudo
-char lettreActuelle = 'A'; // Lettre sélectionnée actuellement
-int indexLettre = 0;      // Position dans le tableau de lettres autorisées
-const char lettresAutorisees[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,!?;:@#&+-*/@]}";
+int modeBuzzer = 0;       
+const int nbModesBuzzer = 3; 
 
-int modeBuzzer = 0;       // Sélection du mode sonore
-const int nbModesBuzzer = 3; // Nombre total de sons possibles
+// --- ADRESSES EEPROM (CORRIGEES) ---
+// On espace les adresses pour éviter que les variables se marchent dessus
+const int addrCanal = 0;        // Int (2 octets) -> occupe adresses 0 et 1
+const int addrBuzzer = 10;      // Int -> occupe adresses 10 et 11
+const int addrPseudo = 20;      // Char array -> commence à 20
 
+// ============================================================
+// --- FONCTIONS LOGIQUES ---
+// ============================================================
 
-
-
-// Adresses EEPROM pour sauvegarde 
-const int addrCanal = 0;  // Adresse pour le canal
-const int addrBuzzer = 1; // Adresse pour le mode buzzer
-const int addrPseudo = 2; // Adresse de début pour le pseudo
-
-
-
-
-
-// Fonction pour lire l'encodeur 
+// --- Gestion de l'Interruption (Encodeur) ---
 void lireEncodeur() {
-  int clk = digitalRead(pinCLK); // On lit l'état actuel du signal CLK
-  // On déclenche seulement quand le signal change de LOW à HIGH (front montant)
-  if(clk != dernierCLK && clk==HIGH){
-    if(modeActuel==CANAL){ // Modification du canal
-      if(digitalRead(pinDT)==HIGH) canal--; // Rotation sens inverse
-      else canal++;                          // Rotation sens direct
-      // Limitation des valeurs
-      if(canal<0) canal=0;
-      if(canal>125) canal=125;
-    } 
+  static unsigned long derniereInterruption = 0;
+  unsigned long tempsActuel = millis();
 
+  // Anti-rebond : on ignore si moins de 5ms s'est écoulé
+  if (tempsActuel - derniereInterruption > 5) {
+    int clk = digitalRead(pinCLK); 
+    
+    // Détection front montant
+    if (clk != dernierCLK && clk == HIGH) { 
+      // Lecture du sens (DT par rapport à CLK)
+      bool sensHoraire = (digitalRead(pinDT) != HIGH); 
 
-
-
-    else if(modeActuel==PSEUDO){ // Modification de la lettre du pseudo
-      if(digitalRead(pinDT)==HIGH) indexLettre--;
-      else indexLettre++;
-      // le Gestion du débordement pour revenir au début ou à la fin
-      if(indexLettre>=sizeof(lettresAutorisees)-1) indexLettre=0;
-      if(indexLettre<0) indexLettre=sizeof(lettresAutorisees)-2;
-      lettreActuelle = lettresAutorisees[indexLettre];
-    } 
-    else if(modeActuel==BUZZER){ // Modification du mode buzzer
-      if(digitalRead(pinDT)==HIGH) modeBuzzer--;
-      else modeBuzzer++;
-      // Gestion du débordement
-      if(modeBuzzer>=nbModesBuzzer) modeBuzzer=0;
-      if(modeBuzzer<0) modeBuzzer=nbModesBuzzer-1;
+      if (modeActuel == CANAL) { 
+        if (sensHoraire) canal++; else canal--;
+        // Boucle 0-125
+        if (canal < 0) canal = 125;      
+        if (canal > 125) canal = 0;      
+      } 
+      else if (modeActuel == PSEUDO) { 
+        if (sensHoraire) indexLettre++; else indexLettre--;
+        
+        // Cast (int) pour éviter le warning de compilation
+        int taille = (int)sizeof(lettresAutorisees) - 1; // -1 pour ignorer le caractère nul de fin
+        
+        if (indexLettre >= taille) indexLettre = 0;
+        if (indexLettre < 0) indexLettre = taille - 1;
+        
+        lettreActuelle = lettresAutorisees[indexLettre];
+      } 
+      else if (modeActuel == BUZZER) { 
+        if (sensHoraire) modeBuzzer++; else modeBuzzer--;
+        if (modeBuzzer >= nbModesBuzzer) modeBuzzer = 0;
+        if (modeBuzzer < 0) modeBuzzer = nbModesBuzzer - 1;
+      }
+      changement = true; 
     }
-    changement=true; // ici on Indique à la boucle principale qu'il faut mettre à jour l'affichage
-  }
-  dernierCLK=clk; // On mémorise l'état pour le prochain changement
-}
-
-
-
-// Sauvegarde des paramètres dans l'EEPROM 
-void sauvegarderParams(){
-  EEPROM.update(addrCanal, canal);         // Sauvegarde du canal
-  EEPROM.update(addrBuzzer, modeBuzzer);   // Sauvegarde du mode buzzer
-  // Sauvegarde du pseudo caractère par caractère
-  for(int i=0;i<longueurMaxPseudo;i++){
-    char c = (i<pseudo.length()) ? pseudo[i] : 0; // 0 = fin de chaîne
-    EEPROM.update(addrPseudo+i, c);
+    dernierCLK = clk;
+    derniereInterruption = tempsActuel;
   }
 }
 
-
-
-
-//  Chargement des paramètres depuis l'EEPROM 
-void chargerParams(){
-  canal = EEPROM.read(addrCanal);
-  modeBuzzer = EEPROM.read(addrBuzzer);
-  pseudo="";
-  for(int i=0;i<longueurMaxPseudo;i++){
-    char c = EEPROM.read(addrPseudo+i);
-    if(c==0) break; // On arrête si on atteint la fin du pseudo
-    pseudo+=c;
-  }
+// --- Sauvegarde ---
+void sauvegarderParams() {
+  // EEPROM.put est plus sûr que write, il gère les types int et tableaux auto
+  EEPROM.put(addrCanal, canal);
+  EEPROM.put(addrBuzzer, modeBuzzer);
+  EEPROM.put(addrPseudo, pseudo); 
 }
 
+// --- Chargement ---
+void chargerParams() {
+  EEPROM.get(addrCanal, canal);
+  EEPROM.get(addrBuzzer, modeBuzzer);
+  EEPROM.get(addrPseudo, pseudo);
 
+  // Sécurité : Si l'EEPROM est vide ou corrompue, on remet à zéro
+  if (canal < 0 || canal > 125) canal = 0;
+  if (modeBuzzer < 0 || modeBuzzer > 2) modeBuzzer = 0;
+  
+  // Assure que le pseudo se termine bien par un caractère nul
+  pseudo[10] = '\0'; 
+}
 
-// Affichage des informations sur l'écran OLED 
-void afficherInfo(){
+// --- Affichage ---
+void afficherInfo() {
   ecran.clearDisplay();
   ecran.setTextSize(1);
   ecran.setTextColor(SSD1306_WHITE);
-  ecran.setCursor(0,0);
-  ecran.print("Mode: ");
-  if(modeActuel==CANAL) ecran.println("CANAL");
-  else if(modeActuel==PSEUDO) ecran.println("PSEUDO");
-  else ecran.println("BUZZER");
+  
+  // En-tête
+  ecran.setCursor(0, 0);
+  if (modeActuel == CANAL) ecran.println(F(">> CONFIG CANAL <<"));
+  else if (modeActuel == PSEUDO) ecran.println(F(">> CONFIG PSEUDO <<"));
+  else ecran.println(F(">> CONFIG SON <<"));
+  
+  ecran.drawLine(0, 10, 128, 10, SSD1306_WHITE);
 
-
-
-  if(modeActuel==CANAL){
-    ecran.setCursor(0,15);
-    ecran.print("Canal: "); ecran.println(canal);
-    ecran.setCursor(0,30);
-    ecran.println("Tournez l'encodeur"); // Indique l'action à l'utilisateur
-    ecran.setCursor(0,45);
-    ecran.println("Appui = valider"); // Bouton pour valider
+  // Contenu selon le mode
+  if (modeActuel == CANAL) {
+    ecran.setTextSize(2);
+    ecran.setCursor(40, 25);
+    ecran.println(canal);
+    
+    ecran.setTextSize(1);
+    ecran.setCursor(0, 55);
+    ecran.println(F("Click = Valider"));
   } 
-
-
-  else if(modeActuel==PSEUDO){
-    ecran.setCursor(0,15);
-    ecran.print("Pseudo: "); ecran.println(pseudo);
-    ecran.setCursor(0,30);
-    ecran.print("Lettre: "); ecran.println(lettreActuelle);
-    ecran.setCursor(0,45);
-    ecran.println("Tournez pour changer"); // On change la lettre avec l'encodeur
-    ecran.setCursor(0,55);
-    ecran.println("Appui = ajouter");    // Ajoute la lettre au pseudo
+  else if (modeActuel == PSEUDO) {
+    ecran.setCursor(0, 15);
+    ecran.print(F("Actuel: ")); ecran.println(pseudo);
+    
+    ecran.setCursor(0, 35);
+    ecran.print(F("Ajout : [ ")); 
+    ecran.setTextSize(2);
+    ecran.print(lettreActuelle);
+    ecran.setTextSize(1);
+    ecran.println(F(" ]"));
+    
+    ecran.setCursor(0, 55);
+    ecran.println(F("Click=Add Long=Exit"));
+    ecran.println(F("Click=Add Btn2=Del"));
   } 
-
-
-
-  else if(modeActuel==BUZZER){
-    ecran.setCursor(0,15);
-    ecran.print("Sonorite: ");
-    if(modeBuzzer==0) ecran.println("Court");
-    else if(modeBuzzer==1) ecran.println("Long");
-    else ecran.println("Double");
-    ecran.setCursor(0,30);
-    ecran.println("Tournez pour changer"); // Changer le type de son
-    ecran.setCursor(0,45);
-    ecran.println("Appui = valider"); // Valider le choix du buzzer
+  else if (modeActuel == BUZZER) {
+    ecran.setTextSize(2);
+    ecran.setCursor(20, 25);
+    if (modeBuzzer == 0) ecran.println(F("Court"));
+    else if (modeBuzzer == 1) ecran.println(F("Long"));
+    else ecran.println(F("Double"));
+    
+    ecran.setTextSize(1);
+    ecran.setCursor(0, 55);
+    ecran.println(F("Click = Valider"));
   }
 
-
-
-  ecran.display(); // Met à jour l'écran
+  ecran.display();
 }
 
-//  Configuration initiale 
-void setup(){
-  pinMode(pinCLK, INPUT_PULLUP); // Pull-up interne pour éviter les flottements
+// ============================================================
+// --- SETUP & LOOP ---
+// ============================================================
+
+void setup() {
+  pinMode(pinCLK, INPUT_PULLUP);
   pinMode(pinDT, INPUT_PULLUP);
   pinMode(pinSW, INPUT_PULLUP);
   pinMode(buzzer, OUTPUT);
 
-  dernierCLK = digitalRead(pinCLK);
-  attachInterrupt(digitalPinToInterrupt(pinCLK), lireEncodeur, CHANGE); 
-  // Déclenche la fonction lireEncodeur à chaque changement du signal CLK
-
-  if(!ecran.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)){
-    while(1); // Bloque si l'écran n'est pas détecté
+  // 1. Ecran
+  if (!ecran.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    for (;;); // Bloque si erreur écran
   }
-
-
-
-  ecran.clearDisplay();
-  ecran.setCursor(0,0);
-  ecran.println("Veuillez choisir canal | Pseudo | Son");
-  ecran.display();
-
-  // Initialisation des valeurs
-  canal = 0;
-  pseudo = "";
-  modeBuzzer = 0;
-  indexLettre = 0;
-  lettreActuelle = lettresAutorisees[0];
-  sauvegarderParams(); // On sauvegarde les valeurs par défaut
-
+  
+  // 2. Chargement des paramètres AVANT tout le reste
+  chargerParams();
+  
+  // 3. Radio
   radio.begin();
-  radio.setChannel(canal); // On configure le canal initial
+  radio.setChannel(canal);
+
+  // 4. Initialisation Interruption
+  dernierCLK = digitalRead(pinCLK);
+  attachInterrupt(digitalPinToInterrupt(pinCLK), lireEncodeur, CHANGE);
+
+  afficherInfo();
 }
 
-
-
-
-//  Boucle principale 
-void loop(){
-  // Si une valeur a changé, on met à jour l'affichage
-  if(changement){
+void loop() {
+  // Mise à jour écran si l'encodeur a bougé
+  if (changement) {
     afficherInfo();
-    changement=false;
+    changement = false;
   }
 
-  int etatBouton = digitalRead(pinSW); // Lecture du bouton
-  static unsigned long debutAppui=0;   // Temps du début de l'appui
+  // --- Gestion du Bouton Retour (A6) ---
+  static bool boutonRetourRelache = true;
+  // Lecture analogique car A6 est purement analogique sur Nano
+  if (analogRead(pinBoutonRetour) < 500) { 
+    if (boutonRetourRelache && modeActuel == PSEUDO) {
+      int len = strlen(pseudo);
+      if (len > 0) {
+        pseudo[len - 1] = '\0';
+        sauvegarderParams();
+        tone(buzzer, 500, 100); // Son plus grave pour effacer
+        changement = true;
+      }
+      boutonRetourRelache = false;
+    }
+  } else {
+    boutonRetourRelache = true;
+  }
 
-  if(etatBouton==LOW){ // Bouton appuyé
-    if(debutAppui==0) debutAppui=millis(); // On enregistre le début de l'appui
-  } else { // Bouton relâché
-    if(debutAppui!=0){
-      unsigned long duree = millis()-debutAppui; // Durée de l'appui
-      if(duree>=800){ // Appui long = changer de mode
-        if(modeActuel==CANAL) modeActuel=PSEUDO;
-        else if(modeActuel==PSEUDO) modeActuel=BUZZER;
-        else modeActuel=CANAL;
-        afficherInfo();
-      } else { // Appui court = valider ou ajouter
-        if(modeActuel==CANAL){
-          radio.setChannel(canal); // Appliquer le nouveau canal
-          sauvegarderParams();     // Sauvegarder dans l'EEPROM
+  // Gestion du Bouton (avec anti-rebond logiciel)
+  static int dernierEtatBouton = HIGH;
+  int etatBouton = digitalRead(pinSW);
+  static unsigned long debutAppui = 0;
+
+  // Détection appui
+  if (etatBouton == LOW && dernierEtatBouton == HIGH) {
+    debutAppui = millis();
+  } 
+  // Détection relâchement
+  else if (etatBouton == HIGH && dernierEtatBouton == LOW) {
+    unsigned long duree = millis() - debutAppui;
+    
+    // On ignore les parasites < 50ms
+    if (duree > 50) {
+      // --- APPUI LONG (> 800ms) : CHANGER DE MODE ---
+      if (duree >= 800) { 
+        if (modeActuel == CANAL) modeActuel = PSEUDO;
+        else if (modeActuel == PSEUDO) modeActuel = BUZZER;
+        else modeActuel = CANAL;
+        
+        // Son de changement de menu
+        tone(buzzer, 2000, 50); delay(100); tone(buzzer, 2500, 50);
+      } 
+      // --- APPUI COURT : ACTION ---
+      else { 
+        if (modeActuel == CANAL) {
+          radio.setChannel(canal); 
+          sauvegarderParams();
+          tone(buzzer, 1500, 100); 
         } 
-        else if(modeActuel==PSEUDO){
-          if(pseudo.length()<longueurMaxPseudo){
-            pseudo+=lettreActuelle; // Ajouter la lettre au pseudo
+        else if (modeActuel == PSEUDO) {
+          int len = strlen(pseudo);
+          if (len < longueurMaxPseudo) {
+            pseudo[len] = lettreActuelle;
+            pseudo[len + 1] = '\0'; // Toujours fermer la chaine de caractères
             sauvegarderParams();
+            tone(buzzer, 1500, 50);
+          } else {
+             tone(buzzer, 200, 300); // Erreur (plein)
           }
         } 
-        else if(modeActuel==BUZZER){
-          // Jouer le son correspondant au mode choisi
-          if(modeBuzzer==0) tone(buzzer,1000,100);
-          else if(modeBuzzer==1) tone(buzzer,1000,500);
-          else { tone(buzzer,1000,100); delay(150); tone(buzzer,1000,100);}
+        else if (modeActuel == BUZZER) {
           sauvegarderParams();
+          // Test du son choisi
+          if (modeBuzzer == 0) tone(buzzer, 1000, 100);
+          else if (modeBuzzer == 1) tone(buzzer, 1000, 500);
+          else { tone(buzzer, 1000, 100); delay(150); tone(buzzer, 1000, 100); }
         }
       }
-      debutAppui=0; // Réinitialisation pour le prochain appui
+      changement = true; // Force rafraichissement écran
     }
   }
+  dernierEtatBouton = etatBouton;
 }
