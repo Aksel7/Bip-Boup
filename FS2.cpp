@@ -19,7 +19,7 @@ const byte adresse[6] = "PIPE1";
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
 // --- LES DONNEES A ENVOYER ---
-String mon_pseudo = "Passion_Electro";
+String mon_pseudo = "Jo";
 String mon_message = "Ceci est un test avec confirmation. Si tu vois OK, c'est que le recepteur a bien recu !";
 
 void setup() {
