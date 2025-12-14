@@ -272,6 +272,7 @@ void verifierReceptionRadio() {
 // ============================================================
 
 void gestionMenuPrincipal() {
+  // --- Navigation avec l'encodeur ---
   if (encoderDelta != 0) {
     if (encoderDelta > 0) indexMenu++; else indexMenu--;
     encoderDelta = 0; 
@@ -280,6 +281,7 @@ void gestionMenuPrincipal() {
     if (indexMenu < 0) indexMenu = 2;
   }
 
+  // --- Affichage ---
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -291,7 +293,7 @@ void gestionMenuPrincipal() {
   display.setCursor(10, 20);
   if(indexMenu == 0) display.print(F("> ")); 
   display.print(F("LIRE MSG"));
-  if(nouveauMessageRecu) display.print(F(" [!]"));
+  if(nouveauMessageRecu) display.print(F(" [!]")); // Petit indicateur si nouveau message
   
   display.setCursor(10, 35);
   if(indexMenu == 1) display.print(F("> ")); 
@@ -303,14 +305,23 @@ void gestionMenuPrincipal() {
 
   display.display();
 
+  // --- Validation (Click) ---
   if (flagClickCourt || flagAux) {
-    bip(0); 
+    bip(0); // Petit bip de validation touche
     
     if (indexMenu == 0) {
+      // --- C'EST ICI QUE L'ALARME S'ARRETE ---
       etatGlobal = MODE_LIRE;
+      
+      // 1. On dit qu'on a vu le message (enlève le [!] du menu)
       nouveauMessageRecu = false; 
-      // Validation EF8 : On éteint la LED quand on lit le message
+      
+      // 2. On éteint les LEDs immédiatement (Validation EF8)
       allumerLedPriorite(0); 
+
+      // 3. On coupe le son immédiatement (au cas où ça sonne encore)
+      noTone(pinBuzzer);
+      // ---------------------------------------
     }
     else if (indexMenu == 1) {
         etatEcriture = E_SAISIE;
