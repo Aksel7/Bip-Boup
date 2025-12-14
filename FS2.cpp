@@ -1,19 +1,25 @@
 /*
-    PROJET : Emetteur NRF24 - Version FINALE (Avec Confirmation)
-    BUT    : Envoyer un Pseudo et un Message long, et vérifier si ça arrive.
+    PROJET : Emetteur NRF24 - Version FINALE (Avec Confirmation + Canal EEPROM)
+    BUT    : Envoyer un Pseudo et un Message long sur un canal spécifique.
 */
 
 #include <SPI.h>
 #include <RF24.h>
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
+#include <EEPROM.h> // <--- AJOUT : Nécessaire pour sauvegarder le canal
 
 // --- CONFIGURATION ---
 // Radio
 #define PIN_CE  7
 #define PIN_CSN 8
 RF24 radio(PIN_CE, PIN_CSN);
-const byte adresse[6] = "PIPE1";
+
+const byte adresse[6] = "PIPE1"; // On garde PIPE1 comme convenu
+
+// <--- AJOUT : Variables pour le canal
+int canal = 0;           
+const int addrCanal = 0; // Adresse mémoire dans l'Arduino
 
 // Ecran OLED
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
@@ -23,11 +29,10 @@ String mon_pseudo = "Jo";
 String mon_message = "Ceci est un test avec confirmation. Si tu vois OK, c'est que le recepteur a bien recu !";
 
 void setup() {
-  pinMode(10,OUTPUT); // Nécessaire pour le SPI sur certains Arduinos
+  pinMode(10,OUTPUT); 
   
   // 1. Démarrage Ecran
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
-    // Si l'écran ne s'allume pas, on boucle ici
     for(;;); 
   }
   
@@ -37,24 +42,40 @@ void setup() {
   
   // 2. Démarrage Radio
   radio.begin();
+
+  // <--- AJOUT : Configuration du CANAL depuis la mémoire
+  byte lectureEEPROM = EEPROM.read(addrCanal);
+  if (lectureEEPROM > 125) { 
+    canal = 0; // Sécurité si mémoire vide
+  } else {
+    canal = lectureEEPROM;
+  }
+  
+  radio.setChannel(canal); // <--- C'est ici que la fréquence est réglée !
+  // ---------------------------------------------------------
   
   // Vérification si le module radio est bien branché
   if (!radio.isChipConnected()) {
     display.setCursor(0,0);
     display.println("Erreur Radio !");
-    display.println("Verifiez cablage."); // treès aléatoire aucune idée comment debug
+    display.println("Verifiez cablage."); 
     display.display();
     while(1);
   }
 
-  radio.openWritingPipe(adresse); // adresse renseignée dans FS5
+  radio.openWritingPipe(adresse); 
   radio.setPALevel(RF24_PA_MIN); 
   radio.stopListening(); // Mode Emetteur
 
-  // Petit message d'accueil
+  // Petit message d'accueil AVEC le canal
   display.setCursor(0, 0);
   display.println("Emetteur Pret !");
+  
+  // <--- AJOUT : Affichage du canal pour info
+  display.print("Canal Radio: ");
+  display.println(canal);
   display.display();
+  
   delay(2000);
 }
 
@@ -89,6 +110,11 @@ void envoyer_le_texte(char type, String texte_a_envoyer) {
     display.clearDisplay();
     display.setCursor(0, 0);
     
+    // <--- AJOUT : Rappel du canal en haut de l'écran
+    display.print("[CH:"); 
+    display.print(canal);
+    display.println("]");
+
     if (type == 'P') {
       display.println(">> Envoi PSEUDO");
       display.println(mon_pseudo);
@@ -99,12 +125,12 @@ void envoyer_le_texte(char type, String texte_a_envoyer) {
     }
     
     display.println("-----");
-    display.print("Statut Radio: ");
+    display.print("Statut: ");
     
     if (accuse_reception) {
-       display.println("OK"); // Succès
+       display.println("OK (Recu)"); // Succès
     } else {
-       display.println("X");  // Échec
+       display.println("X (Perdu)");  // Échec
     }
 
     display.display();
@@ -127,7 +153,9 @@ void loop() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println("Message termine.");
-  display.println("Pause de 5 sec...");
+  display.print("Canal: ");
+  display.println(canal);
+  display.println("Pause 5 sec...");
   display.display();
   
   delay(5000); 
