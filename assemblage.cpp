@@ -1,23 +1,25 @@
 /*
- * PROJET FUSIONNE : Terminal de Messagerie NRF24 + Saisie OLED
- * Matériel : Arduino Nano, NRF24L01, OLED SSD1306, Encodeur Rotatif
+ * PROJET FINAL : Terminal de Messagerie LoRa/NRF24
+ * Fusion : Menu Principal + Saisie (Assemblage) + Paramètres (FS5)
+ * Matériel : Arduino Nano, NRF24L01, OLED SSD1306, Encodeur Rotatif, Buzzer
  */
 
 #include <SPI.h>
 #include <Wire.h>
+#include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <RF24.h>
 #include <EEPROM.h>
 
 // ============================================================
-// --- CONFIGURATION MATERIEL ---
+// --- CONFIGURATION MATERIEL (PINS) ---
 // ============================================================
 
 // --- Ecran OLED ---
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+#define OLED_ADDR 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // --- Radio NRF24L01 ---
 #define PIN_CE  7
@@ -25,422 +27,569 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 RF24 radio(PIN_CE, PIN_CSN);
 const byte adresse[6] = "PIPE1"; 
 
-// --- Configuration Canal Radio ---
-int canal = 0;           
-const int addrCanal = 0; // Adresse mémoire EEPROM
-
 // --- Encodeur & Boutons ---
-const int brocheEncodeur_A = 3; 
-const int brocheEncodeur_B = 4; 
-const int brocheBouton_Encodeur = 2; // Selection lettre
-const int brocheBouton_Valider = A6; // Validation finale / Backspace long
-const int brocheLED_Validation = 5;  // LED Feedback
+const int PIN_ENC_CLK = 3;  // Interruption
+const int PIN_ENC_DT  = 4; 
+const int PIN_BTN_SW  = 2;  // Bouton Encodeur
+const int PIN_BTN_AUX = A6; // Bouton Rouge/Auxiliaire
+const int PIN_LED_FB  = 5;  // LED Feedback
+const int PIN_BUZZER  = 10; // Buzzer Passif
 
 // ============================================================
-// --- VARIABLES GLOBALES ---
+// --- VARIABLES GLOBALES & ETATS ---
 // ============================================================
 
-// --- Pseudo ---
-String pseudo = "NanoUser"; 
+// --- Machine d'état Globale ---
+enum GlobalState {
+  MENU_PRINCIPAL,
+  ECRIRE_MESSAGE,
+  LIRE_MESSAGE,
+  PARAMETRES
+};
+GlobalState etatGlobal = MENU_PRINCIPAL;
 
-// --- Gestion du Texte ---
-const char* listeCaracteres = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,!?'@\x82\x85\x87\x88\x97<";
-const int tailleListeCaracteres = 44; 
+// --- Données Persistantes (EEPROM) ---
+// Adresses EEPROM
+const int ADDR_CANAL = 0;
+const int ADDR_BUZZER = 10;
+const int ADDR_PSEUDO = 20;
 
-struct Message {
+// Variables configurables
+int radioCanal = 0;
+int modeBuzzer = 0; // 0=Court, 1=Long, 2=Double
+char pseudoGlobal[11] = "User"; // Max 10 chars + null
+
+// --- Variables de Gestion Encodeur ---
+volatile int encoderDelta = 0; // Compteur de pas
+int lastEncoded = 0;
+
+// --- Variables Menu Principal ---
+const char* menuItems[] = {"LIRE MSG", "ECRIRE MSG", "PARAMETRES"};
+int menuIndex = 0;
+
+// --- Variables "Ecrire Message" ---
+const char* listeCaracteres = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,!?'@";
+const int tailleListeCaracteres = 43;
+struct MessageData {
   char texte[101]; 
-  int priorite;    
+  int priorite; // 1=Urgent, 2=Normal, 3=Basse
 };
-Message monMessage; 
-int positionCurseurMessage = 0;
+MessageData monMessage; 
+int msgCursorPos = 0;
+int charSelectIndex = 0;
+int etatEcriture = 0; // 0=Saisie, 1=Priorité, 2=Envoi
+int dernierIndexAffiche = -1;
 
-// --- Variables Interface (UI) ---
-volatile int indexCaractereSelectionne = 0; 
-int dernierIndexCaractereAffiche = -1;
-volatile int compteurBrutEncodeur = 0; 
-const int SENSIBILITE = 2; 
-
-// --- Gestion des Rebond (Debounce) ---
-long dernierTempsDebounceEnc = 0;
-int etatPrecedentBoutonEnc = HIGH;
-int etatPrecedentBoutonVal = HIGH;
-unsigned long tempsDebutAppuiVal = 0;
-bool appuiLongTraite = false; 
-const long delaiDebounce = 50;
-const long DUREE_APPUI_LONG = 1000; 
-
-// --- Machine d'état ---
-enum EtatSysteme {
-  SAISIE_TEXTE,
-  CHOIX_PRIORITE,
-  ENVOI_EN_COURS,
-  ATTENTE_RESET
-};
-EtatSysteme etatActuel = SAISIE_TEXTE;
+// --- Variables "Paramètres" ---
+int paramSubState = 0; // 0=Canal, 1=Pseudo, 2=Son
+int paramCharIndex = 0;
+const char paramLettres[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 // ============================================================
 // --- PROTOTYPES ---
 // ============================================================
-void gererRotationEncodeur();
-void gererLimitesIndex(int max);
-void gererLimitesPriorite();
-void gererAffichageSaisie();
-void gererAffichagePriorite();
+void isrEncoder();
+void bip(int type); // 0=Valid, 1=Erreur, 2=Menu
+void sauvegarderParams();
+void chargerParams();
+void afficherMenuPrincipal();
+void logiqueMenuPrincipal();
+void logiqueEcrireMessage();
+void logiqueParametres();
+void logiqueLireMessage();
 void envoyerMessageRadio();
 void envoyer_paquet_fragment(char type, String texte_a_envoyer);
-void clignoterLED();
-void resetSysteme();
-void gererBoutonSelectionLettre(); 
-void gererBoutonValidation();       
+bool checkBoutonAuxLong(); // Retour True si appui long (Retour Menu)
 
 // ============================================================
 // --- SETUP ---
 // ============================================================
 void setup() {
   Serial.begin(9600);
-  pinMode(10, OUTPUT);
+  
+  // Init Pins
+  pinMode(PIN_ENC_CLK, INPUT_PULLUP);
+  pinMode(PIN_ENC_DT, INPUT_PULLUP);
+  pinMode(PIN_BTN_SW, INPUT_PULLUP);
+  pinMode(PIN_LED_FB, OUTPUT);
+  pinMode(PIN_BUZZER, OUTPUT);
+  
   // Init Ecran
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
-    for(;;);
+  if(!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) { 
+    for(;;); // Bloque si erreur
   }
   display.cp437(true); 
-  display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
+  display.clearDisplay();
 
-  // Init Pins
-  pinMode(brocheEncodeur_A, INPUT_PULLUP);
-  pinMode(brocheEncodeur_B, INPUT_PULLUP);
-  pinMode(brocheBouton_Encodeur, INPUT_PULLUP);
-  pinMode(brocheLED_Validation, OUTPUT);
-  digitalWrite(brocheLED_Validation, LOW);
-  
-  // Interruptions Encodeur
-  attachInterrupt(digitalPinToInterrupt(brocheEncodeur_A), gererRotationEncodeur, CHANGE);
+  // Chargement Paramètres
+  chargerParams();
 
   // Init Radio
   radio.begin();
-  
-  // Lecture Canal EEPROM
-  byte lectureEEPROM = EEPROM.read(addrCanal);
-  if (lectureEEPROM > 125) canal = 0; 
-  else canal = lectureEEPROM;
-  
-  radio.setChannel(canal); 
+  radio.setChannel(radioCanal);
   radio.openWritingPipe(adresse); 
-  radio.setPALevel(RF24_PA_MIN); 
-  radio.stopListening(); 
+  radio.setPALevel(RF24_PA_MIN);
+  radio.stopListening();
 
-  // Vérification Radio
- /*  if (!radio.isChipConnected()) {
-    display.setCursor(0,0);
-    display.println(F("ERR: Radio HS"));
-    display.display();
-    delay(2000);
-  } */
+  // Interruptions
+  attachInterrupt(digitalPinToInterrupt(PIN_ENC_CLK), isrEncoder, CHANGE);
 
-  // Init Variables
-  resetSysteme();
-  
-  // Ecran d'accueil rapide
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println(F("SYSTEME PRET"));
-  display.print(F("Canal: ")); display.println(canal);
+  // Splash Screen
+  display.setTextSize(1);
+  display.setCursor(20, 20); display.println(F("SYSTEME PRET"));
+  display.setCursor(20, 35); display.print(F("Pseudo: ")); display.println(pseudoGlobal);
   display.display();
-  delay(1000);
-  display.clearDisplay();
+  delay(1500);
+  bip(0);
 }
 
 // ============================================================
 // --- LOOP ---
 // ============================================================
 void loop() {
-  switch (etatActuel) {
-    case SAISIE_TEXTE:
-      gererLimitesIndex(tailleListeCaracteres);
-      gererAffichageSaisie();
-      break;
-      
-    case CHOIX_PRIORITE:
-      gererLimitesPriorite();
-      gererAffichagePriorite();
-      break;
-      
-    case ENVOI_EN_COURS:
-      // Envoi du message
-      envoyerMessageRadio();
-      etatActuel = ATTENTE_RESET;
-      break;
-
-    case ATTENTE_RESET:
-      // Pause lecture résultat
-      delay(2000);
-      resetSysteme();
-      break;
+  // Sécurité Globale : Appui long sur A6 ramène au menu
+  if (checkBoutonAuxLong()) {
+    etatGlobal = MENU_PRINCIPAL;
+    bip(2);
+    delay(500); // Anti-rebond après reset
   }
 
-  // Les boutons ne sont actifs que si on n'est pas en train d'envoyer
-  if (etatActuel == SAISIE_TEXTE || etatActuel == CHOIX_PRIORITE) {
-    gererBoutonSelectionLettre(); 
-    gererBoutonValidation();   
+  switch (etatGlobal) {
+    case MENU_PRINCIPAL:
+      logiqueMenuPrincipal();
+      break;
+    
+    case ECRIRE_MESSAGE:
+      logiqueEcrireMessage();
+      break;
+
+    case LIRE_MESSAGE:
+      logiqueLireMessage();
+      break;
+
+    case PARAMETRES:
+      logiqueParametres();
+      break;
   }
-  
-  delay(10); 
 }
 
 // ============================================================
-// --- FONCTIONS LOGIQUE METIER (RADIO) ---
+// --- FONCTIONS LOGIQUES PAR ETAT ---
 // ============================================================
 
-void envoyerMessageRadio() {
-  // Feedback Visuel
-  clignoterLED(); 
-  
-  // Envoi du Pseudo
-  envoyer_paquet_fragment('P', pseudo);
-  delay(500);
+// --- 1. MENU PRINCIPAL ---
+void logiqueMenuPrincipal() {
+  // Gestion Navigation
+  if (encoderDelta != 0) {
+    if (encoderDelta > 0) menuIndex++;
+    else menuIndex--;
+    encoderDelta = 0; // Reset delta
+    
+    if (menuIndex > 2) menuIndex = 0;
+    if (menuIndex < 0) menuIndex = 2;
+    bip(2);
+  }
 
-  // Préparation du Message
-  String messageFinal = "";
+  // Affichage
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0); display.println(F("--- MENU PRINCIPAL ---"));
   
-  // On ajoute un tag de priorité au début du message
-  if (monMessage.priorite == 1) messageFinal += "[URGENT] ";
-  // Priorite 2 (Normal) on ne met rien ou [NORMAL]
-  else if (monMessage.priorite == 3) messageFinal += "[INFO] ";
-  
-  messageFinal += String(monMessage.texte);
+  for(int i=0; i<3; i++) {
+    if (i == menuIndex) {
+       display.fillRect(0, 20 + (i*15), 128, 14, SSD1306_WHITE);
+       display.setTextColor(SSD1306_BLACK);
+    } else {
+       display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(5, 23 + (i*15));
+    display.println(menuItems[i]);
+  }
+  display.setTextColor(SSD1306_WHITE);
+  display.display();
 
-  // Envoi du Message
-  envoyer_paquet_fragment('M', messageFinal);
+  // Validation
+  if (digitalRead(PIN_BTN_SW) == LOW) {
+    delay(50); // Debounce
+    while(digitalRead(PIN_BTN_SW) == LOW); // Attente relachement
+    
+    bip(0);
+    if (menuIndex == 0) etatGlobal = LIRE_MESSAGE;
+    if (menuIndex == 1) {
+      etatGlobal = ECRIRE_MESSAGE;
+      // Reset variables écriture
+      msgCursorPos = 0;
+      memset(monMessage.texte, 0, sizeof(monMessage.texte));
+      etatEcriture = 0; 
+      monMessage.priorite = 2;
+      dernierIndexAffiche = -1;
+    }
+    if (menuIndex == 2) {
+      etatGlobal = PARAMETRES;
+      paramSubState = 0; // Commencer par Canal
+    }
+  }
+}
+
+// --- 2. ECRIRE MESSAGE (Adapté de assemblage.cpp) ---
+void logiqueEcrireMessage() {
+  // Navigation Carrousel
+  if (etatEcriture == 0 || etatEcriture == 1) { // Saisie ou Priorité
+    if (encoderDelta != 0) {
+       if (encoderDelta > 0) charSelectIndex++;
+       else charSelectIndex--;
+       encoderDelta = 0;
+       
+       int max = (etatEcriture == 0) ? tailleListeCaracteres : 4; // 4 choix en priorité
+       if (charSelectIndex >= max) charSelectIndex = 0;
+       if (charSelectIndex < 0) charSelectIndex = max - 1;
+    }
+  }
+
+  // --- Affichage ---
+  if (charSelectIndex != dernierIndexAffiche || etatEcriture == 2) {
+    display.clearDisplay();
+    
+    if (etatEcriture == 0) { // SAISIE TEXTE
+      // Bandeau sélection
+      int idxPrec = (charSelectIndex - 1 + tailleListeCaracteres) % tailleListeCaracteres;
+      int idxSuiv = (charSelectIndex + 1) % tailleListeCaracteres;
+      
+      display.setTextSize(1);
+      display.setCursor(10, 12); display.print(listeCaracteres[idxPrec]);
+      display.setCursor(110, 12); display.print(listeCaracteres[idxSuiv]);
+      
+      display.setTextSize(2);
+      display.setCursor(58, 8); display.print(listeCaracteres[charSelectIndex]);
+      
+      display.setTextSize(1);
+      display.drawLine(0, 30, 128, 30, SSD1306_WHITE);
+      display.setCursor(0, 35); display.print(monMessage.texte);
+      display.print(F("_")); // Curseur
+
+      display.setCursor(0,0); display.print(F("Saisie... Btn2=Eff"));
+    }
+    else if (etatEcriture == 1) { // CHOIX PRIORITE
+      display.setTextSize(1);
+      display.setCursor(0,0); display.println(F("PRIORITE ?"));
+      display.setTextSize(2);
+      display.setCursor(10,30);
+      
+      // Index 1=Urgent, 2=Normal, 3=Basse (On mappe 0..3 vers 1..3 pour simplifier l'UI)
+      if (charSelectIndex == 1) display.print(F("<URGENT>"));
+      else if (charSelectIndex == 2) display.print(F("<NORMAL>"));
+      else display.print(F("<BASSE>"));
+    }
+    else if (etatEcriture == 2) { // ENVOI
+      display.setTextSize(1);
+      display.setCursor(30, 30); display.println(F("ENVOI..."));
+    }
+    display.display();
+    dernierIndexAffiche = charSelectIndex;
+  }
+
+  // --- Actions Bouton Encodeur (Valider) ---
+  if (digitalRead(PIN_BTN_SW) == LOW) {
+    delay(100); while(digitalRead(PIN_BTN_SW) == LOW); // Attente relachement
+    
+    if (etatEcriture == 0) {
+      // Ajout caractère
+      if (msgCursorPos < 100) {
+        monMessage.texte[msgCursorPos] = listeCaracteres[charSelectIndex];
+        msgCursorPos++;
+        monMessage.texte[msgCursorPos] = '\0';
+        dernierIndexAffiche = -1; // Force refresh
+      }
+    } else if (etatEcriture == 1) {
+      // Valider Priorité -> Envoi
+      monMessage.priorite = charSelectIndex; // A ajuster selon logique
+      if (monMessage.priorite < 1) monMessage.priorite = 2; 
+      
+      etatEcriture = 2;
+      dernierIndexAffiche = -1;
+      envoyerMessageRadio();
+      delay(2000);
+      etatGlobal = MENU_PRINCIPAL; // Retour menu après envoi
+    }
+  }
+
+  // --- Actions Bouton Auxiliaire (Effacer / Suivant) ---
+  if (analogRead(PIN_BTN_AUX) < 500) {
+    delay(100); while(analogRead(PIN_BTN_AUX) < 500); // Attente
+
+    if (etatEcriture == 0) {
+      if (msgCursorPos > 0) {
+        // Backspace
+        msgCursorPos--;
+        monMessage.texte[msgCursorPos] = '\0';
+        dernierIndexAffiche = -1;
+        bip(2);
+      } else {
+         // Si texte vide, on passe à l'étape suivante (Validation du msg vide ou non)
+         // Ici on décide que btn Aux vide = Passer à Priorité
+         if (strlen(monMessage.texte) > 0) {
+            etatEcriture = 1;
+            charSelectIndex = 2; // Defaut Normal
+            dernierIndexAffiche = -1;
+            bip(0);
+         }
+      }
+    }
+    // Note: Pour valider la saisie et aller à priorité, 
+    // l'utilisateur peut appuyer longuement sur bouton enc 
+    // ou on peut ajouter un caractere special "OK" dans la liste.
+    // Pour simplifier ici: Si on appuie sur Encodeur sur un ' ' (espace) à la fin ?
+    // Ajoutons plutot la logique : Appui long SW = Passer à priorité.
+  }
   
-  // Fin
+  // Raccourci Validation Saisie : Appui Long Encodeur SW
+  static unsigned long timerSW = 0;
+  if (digitalRead(PIN_BTN_SW) == LOW) {
+     if (millis() - timerSW > 1000 && etatEcriture == 0 && strlen(monMessage.texte) > 0) {
+        etatEcriture = 1; 
+        charSelectIndex = 2;
+        dernierIndexAffiche = -1;
+        bip(0);
+        while(digitalRead(PIN_BTN_SW)==LOW); // Bloque
+     }
+  } else {
+    timerSW = millis();
+  }
+}
+
+// --- 3. PARAMETRES (Adapté de FS5.cpp) ---
+void logiqueParametres() {
+  // Navigation
+  if (encoderDelta != 0) {
+    bool positif = (encoderDelta > 0);
+    encoderDelta = 0;
+
+    if (paramSubState == 0) { // Canal
+      if (positif) radioCanal++; else radioCanal--;
+      if (radioCanal > 125) radioCanal = 0;
+      if (radioCanal < 0) radioCanal = 125;
+    }
+    else if (paramSubState == 1) { // Pseudo
+      if (positif) paramCharIndex++; else paramCharIndex--;
+      int lenParam = strlen(paramLettres);
+      if (paramCharIndex >= lenParam) paramCharIndex = 0;
+      if (paramCharIndex < 0) paramCharIndex = lenParam - 1;
+    }
+    else if (paramSubState == 2) { // Buzzer
+      if (positif) modeBuzzer++; else modeBuzzer--;
+      if (modeBuzzer > 2) modeBuzzer = 0;
+      if (modeBuzzer < 0) modeBuzzer = 2;
+    }
+  }
+
+  // Affichage
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0,0); 
+  
+  if (paramSubState == 0) {
+     display.println(F("CONF: CANAL RADIO"));
+     display.setTextSize(2); display.setCursor(50, 25);
+     display.print(radioCanal);
+     display.setTextSize(1); display.setCursor(0, 50);
+     display.print(F("Btn: Suivant"));
+  }
+  else if (paramSubState == 1) {
+     display.println(F("CONF: PSEUDO"));
+     display.setCursor(0, 15); display.print(F("Actuel: ")); display.println(pseudoGlobal);
+     
+     display.setCursor(0, 35); display.print(F("Ajout > "));
+     display.setTextSize(2); display.write(paramLettres[paramCharIndex]);
+     
+     display.setTextSize(1); display.setCursor(0, 55);
+     display.print(F("Btn:Add  Aux:Del"));
+  }
+  else if (paramSubState == 2) {
+     display.println(F("CONF: SONS"));
+     display.setTextSize(2); display.setCursor(20, 25);
+     if (modeBuzzer == 0) display.print(F("COURT"));
+     if (modeBuzzer == 1) display.print(F("LONG"));
+     if (modeBuzzer == 2) display.print(F("DOUBLE"));
+     display.setTextSize(1); display.setCursor(0, 55);
+     display.print(F("Btn: Save & Exit"));
+  }
+  display.display();
+
+  // Bouton Encodeur (Validation / Suivant)
+  if (digitalRead(PIN_BTN_SW) == LOW) {
+    delay(100); while(digitalRead(PIN_BTN_SW) == LOW);
+    bip(0);
+
+    if (paramSubState == 0) {
+      radio.setChannel(radioCanal);
+      paramSubState = 1; 
+    }
+    else if (paramSubState == 1) {
+      // Ajouter lettre au pseudo
+      int len = strlen(pseudoGlobal);
+      if (len < 10) {
+        pseudoGlobal[len] = paramLettres[paramCharIndex];
+        pseudoGlobal[len+1] = '\0';
+      } else {
+        bip(1); // Erreur plein
+      }
+    }
+    else if (paramSubState == 2) {
+      // Fin -> Sauvegarde et Retour
+      sauvegarderParams();
+      display.clearDisplay();
+      display.setCursor(20, 25); display.print(F("SAUVEGARDE !"));
+      display.display();
+      delay(1000);
+      etatGlobal = MENU_PRINCIPAL;
+    }
+  }
+
+  // Bouton Auxiliaire (Effacer Pseudo / Passer Pseudo)
+  if (analogRead(PIN_BTN_AUX) < 500) {
+    delay(100); while(analogRead(PIN_BTN_AUX) < 500);
+    
+    if (paramSubState == 1) {
+      int len = strlen(pseudoGlobal);
+      if (len > 0) {
+        pseudoGlobal[len-1] = '\0';
+        bip(2);
+      } else {
+        // Si vide, on valide le pseudo vide (ou on passe)
+        paramSubState = 2;
+      }
+    } else if (paramSubState == 1) {
+       // Si on est sur Canal ou Son, Btn Aux pourrait servir de retour ?
+       // Pour l'instant on laisse simple.
+    }
+    
+    // Raccourci pour valider Pseudo (Appui Long Aux sur Pseudo)
+    // Ici simple click vide
+  }
+  
+  // Raccourci : Appui long SW sur Pseudo = Valider Pseudo
+  static unsigned long tPseudo = 0;
+  if (digitalRead(PIN_BTN_SW) == LOW && paramSubState == 1) {
+      if (millis() - tPseudo > 800) {
+         paramSubState = 2;
+         bip(0);
+         while(digitalRead(PIN_BTN_SW) == LOW);
+      }
+  } else {
+    tPseudo = millis();
+  }
+}
+
+// --- 4. LIRE MESSAGE (Placeholder) ---
+void logiqueLireMessage() {
   display.clearDisplay();
   display.setCursor(0,0);
-  display.println(F("SEQUENCE TERMINEE"));
+  display.println(F("--- RECEPTION ---"));
+  
+  display.drawLine(0, 15, 128, 15, SSD1306_WHITE);
+  
+  display.setCursor(10, 30);
+  display.println(F("(En construction)"));
+  
+  display.setCursor(0, 55);
+  display.println(F("Hold Aux -> Menu"));
   display.display();
+  
+  // Ici on pourrait mettre radio.startListening() et check radio.available()
+}
+
+// ============================================================
+// --- FONCTIONS UTILITAIRES ---
+// ============================================================
+
+void isrEncoder() {
+  int MSB = digitalRead(PIN_ENC_CLK); 
+  int LSB = digitalRead(PIN_ENC_DT); 
+
+  int encoded = (MSB << 1) | LSB; 
+  int sum  = (lastEncoded << 2) | encoded; 
+
+  if(sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) encoderDelta++;
+  if(sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000) encoderDelta--;
+
+  lastEncoded = encoded; 
+}
+
+bool checkBoutonAuxLong() {
+  if (analogRead(PIN_BTN_AUX) < 500) {
+    unsigned long start = millis();
+    while (analogRead(PIN_BTN_AUX) < 500) {
+      if (millis() - start > 1000) return true; // Appui long détecté
+    }
+  }
+  return false;
+}
+
+void bip(int type) {
+  if (type == 0) { // Valid
+    tone(PIN_BUZZER, 2000, 50); 
+  } else if (type == 1) { // Erreur
+    tone(PIN_BUZZER, 500, 300);
+  } else if (type == 2) { // Click/Nav
+    if (modeBuzzer > 0) tone(PIN_BUZZER, 1000, 20);
+  }
+}
+
+// --- EEPROM ---
+void sauvegarderParams() {
+  EEPROM.put(ADDR_CANAL, radioCanal);
+  EEPROM.put(ADDR_BUZZER, modeBuzzer);
+  EEPROM.put(ADDR_PSEUDO, pseudoGlobal);
+}
+
+void chargerParams() {
+  EEPROM.get(ADDR_CANAL, radioCanal);
+  EEPROM.get(ADDR_BUZZER, modeBuzzer);
+  EEPROM.get(ADDR_PSEUDO, pseudoGlobal);
+  
+  // Sanitization
+  if (radioCanal < 0 || radioCanal > 125) radioCanal = 0;
+  if (modeBuzzer < 0 || modeBuzzer > 2) modeBuzzer = 0;
+  pseudoGlobal[10] = '\0'; // Sécurité char array
+}
+
+// --- RADIO ENVOI ---
+void envoyerMessageRadio() {
+  digitalWrite(PIN_LED_FB, HIGH);
+  
+  // Envoi Pseudo
+  String sPseudo = String(pseudoGlobal);
+  envoyer_paquet_fragment('P', sPseudo);
+  delay(100);
+
+  // Préparation Texte
+  String messageFinal = "";
+  if (monMessage.priorite == 1) messageFinal += "[URGENT] ";
+  else if (monMessage.priorite == 3) messageFinal += "[INFO] ";
+  messageFinal += String(monMessage.texte);
+
+  // Envoi Texte
+  envoyer_paquet_fragment('M', messageFinal);
+  
+  digitalWrite(PIN_LED_FB, LOW);
 }
 
 void envoyer_paquet_fragment(char type, String texte_a_envoyer) {
-  int longueur_totale = texte_a_envoyer.length();
-  int curseur = 0; 
-
-  while (curseur < longueur_totale) {
-    char paquet[32]; 
-    paquet[0] = type; // 'P' ou 'M'
-
-    // Remplissage
+  int len = texte_a_envoyer.length();
+  int cursor = 0;
+  
+  while (cursor < len) {
+    char paquet[32];
+    memset(paquet, 0, 32);
+    paquet[0] = type;
+    
     for (int i = 1; i < 32; i++) {
-      if (curseur < longueur_totale) {
-        paquet[i] = texte_a_envoyer[curseur];
-        curseur++; 
-      } else {
-        paquet[i] = 0; 
+      if (cursor < len) {
+        paquet[i] = texte_a_envoyer[cursor++];
       }
     }
-
-    // Envoi Radio
-    bool accuse_reception = radio.write(&paquet, sizeof(paquet));
-
-    // Affichage Statut en temps réel
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.print(F("[CH:")); display.print(canal); display.println(F("] Envoi..."));
-    
-    if (type == 'P') display.println(F(">> PSEUDO"));
-    else display.println(F(">> MESSAGE"));
-
-    display.drawLine(0, 20, 128, 20, SSD1306_WHITE);
-    display.setCursor(0, 25);
-    display.print(F("Reste: ")); display.println(longueur_totale - curseur);
-    
-    display.setCursor(0, 45);
-    if (accuse_reception) display.println(F("Statut: OK (Recu)"));
-    else display.println(F("Statut: .. (Perdu)"));
-    
-    display.display();
-    delay(1000);
+    radio.write(&paquet, sizeof(paquet));
+    delay(50); // Petit délai pour laisser le Rx respirer
   }
-}
-
-// ============================================================
-// --- FONCTIONS LOGIQUE METIER (INTERFACE) ---
-// ============================================================
-
-void gererRotationEncodeur() {
-  static unsigned long dernierTempsInterruption = 0;
-  unsigned long tempsActuel = millis();
-
-  if (tempsActuel - dernierTempsInterruption > 5) {
-    if (digitalRead(brocheEncodeur_A) == digitalRead(brocheEncodeur_B)) {
-      compteurBrutEncodeur++;
-    } else {
-      compteurBrutEncodeur--;
-    }
-
-    if (compteurBrutEncodeur >= SENSIBILITE) {
-      indexCaractereSelectionne++;
-      compteurBrutEncodeur = 0; 
-    } 
-    else if (compteurBrutEncodeur <= -SENSIBILITE) {
-      indexCaractereSelectionne--;
-      compteurBrutEncodeur = 0; 
-    }
-    dernierTempsInterruption = tempsActuel;
-  }
-}
-
-void clignoterLED() {
-  for(int i=0; i<3; i++) {
-    digitalWrite(brocheLED_Validation, HIGH); 
-    delay(100); 
-    digitalWrite(brocheLED_Validation, LOW);  
-    delay(100); 
-  }
-}
-
-void resetSysteme() {
-  memset(monMessage.texte, 0, sizeof(monMessage.texte));
-  positionCurseurMessage = 0;
-  indexCaractereSelectionne = 0;
-  dernierIndexCaractereAffiche = -1;
-  compteurBrutEncodeur = 0;
-  monMessage.priorite = 2;
-  etatActuel = SAISIE_TEXTE;
-}
-
-void gererLimitesIndex(int max) {
-  if (indexCaractereSelectionne >= max) indexCaractereSelectionne = 0;
-  if (indexCaractereSelectionne < 0) indexCaractereSelectionne = max - 1;
-}
-
-void gererLimitesPriorite() {
-  if (indexCaractereSelectionne > 3) indexCaractereSelectionne = 1;
-  if (indexCaractereSelectionne < 1) indexCaractereSelectionne = 3;
-}
-
-// --- Affichage Interface Saisie ---
-void gererAffichageSaisie() {
-  if (indexCaractereSelectionne != dernierIndexCaractereAffiche) {
-    display.clearDisplay();
-    int indexPrec = (indexCaractereSelectionne - 1 + tailleListeCaracteres) % tailleListeCaracteres;
-    int indexSuiv = (indexCaractereSelectionne + 1) % tailleListeCaracteres;
-
-    // Bandeau Carrousel
-    display.setTextSize(1);
-    display.setCursor(10, 12); display.print(listeCaracteres[indexPrec]);
-    display.setCursor(110, 12); display.print(listeCaracteres[indexSuiv]);
-
-    display.setTextSize(2);
-    display.setCursor(58, 8);
-    display.print(listeCaracteres[indexCaractereSelectionne]);
-
-    display.setTextSize(1);
-    display.setCursor(40, 12); display.print(F(">"));
-    display.setCursor(80, 12); display.print(F("<"));
-
-    // Zone de texte
-    display.drawLine(0, 30, 128, 30, SSD1306_WHITE);
-    display.setCursor(0, 35);
-    display.println(monMessage.texte);
-    if (positionCurseurMessage < 100) display.print("_"); // Curseur clignotant fixe
-
-    // Compteur caractères
-    display.setCursor(0, 0); display.print(positionCurseurMessage);
-    display.display();
-    dernierIndexCaractereAffiche = indexCaractereSelectionne;
-  }
-}
-
-// --- Affichage Interface Priorité ---
-void gererAffichagePriorite() {
-   if (indexCaractereSelectionne != dernierIndexCaractereAffiche) {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setCursor(0,0); display.println(F("CHOIX PRIORITE"));
-    
-    display.setTextSize(2);
-    display.setCursor(10,25);
-    
-    if (indexCaractereSelectionne == 1) display.print(F("<URGENT>"));
-    else if (indexCaractereSelectionne == 2) display.print(F("<NORMAL>"));
-    else display.print(F("<BASSE>"));
-
-    display.setTextSize(1);
-    display.setCursor(0,55); display.print(F("BtnVal: OK"));
-    display.display();
-    dernierIndexCaractereAffiche = indexCaractereSelectionne;
-   }
-}
-
-// --- Gestion Bouton Encodeur (Ajout Lettre) ---
-void gererBoutonSelectionLettre() {
-  int etat = digitalRead(brocheBouton_Encodeur);
-  if (etat != etatPrecedentBoutonEnc && millis() - dernierTempsDebounceEnc > delaiDebounce) {
-    if (etat == LOW) { 
-      if (etatActuel == SAISIE_TEXTE) {
-        char carChoisi = listeCaracteres[indexCaractereSelectionne];
-        if (carChoisi == '<') { 
-           if (positionCurseurMessage > 0) {
-            positionCurseurMessage--;
-            monMessage.texte[positionCurseurMessage] = '\0';
-            dernierIndexCaractereAffiche = -1; 
-          }
-        } else {
-          if (positionCurseurMessage < 100) { 
-            monMessage.texte[positionCurseurMessage] = carChoisi;
-            positionCurseurMessage++;
-            monMessage.texte[positionCurseurMessage] = '\0';
-            dernierIndexCaractereAffiche = -1;
-          }
-        }
-      }
-      else if (etatActuel == CHOIX_PRIORITE) {
-        monMessage.priorite = indexCaractereSelectionne;
-        etatActuel = ENVOI_EN_COURS;
-      }
-    }
-    dernierTempsDebounceEnc = millis();
-  }
-  etatPrecedentBoutonEnc = etat;
-}
-
-// --- Gestion Bouton Validation (Changement Menu / Effacer) ---
-void gererBoutonValidation() {
-  int lecture = analogRead(brocheBouton_Valider);
-  int etatActuelBouton = (lecture < 500) ? LOW : HIGH; 
-  unsigned long tempsMaintenant = millis();
-
-  if (etatActuelBouton == LOW && etatPrecedentBoutonVal == HIGH) {
-    tempsDebutAppuiVal = tempsMaintenant;
-    appuiLongTraite = false; 
-  }
-
-  // Gestion Appui Long (Backspace)
-  if (etatActuelBouton == LOW && !appuiLongTraite) {
-    if (tempsMaintenant - tempsDebutAppuiVal >= DUREE_APPUI_LONG) {
-      if (etatActuel == SAISIE_TEXTE && positionCurseurMessage > 0) {
-        positionCurseurMessage--;
-        monMessage.texte[positionCurseurMessage] = '\0';
-        dernierIndexCaractereAffiche = -1; 
-        // display.invertDisplay(true); delay(50); display.invertDisplay(false);
-      }
-      appuiLongTraite = true; 
-    }
-  }
-
-  // Gestion Relachement
-  if (etatActuelBouton == HIGH && etatPrecedentBoutonVal == LOW) {
-    if (!appuiLongTraite) {
-       if (etatActuel == SAISIE_TEXTE) {
-         etatActuel = CHOIX_PRIORITE;
-         indexCaractereSelectionne = 2;
-         dernierIndexCaractereAffiche = -1;
-      }
-      else if (etatActuel == CHOIX_PRIORITE) {
-         monMessage.priorite = indexCaractereSelectionne;
-         etatActuel = ENVOI_EN_COURS;
-      }
-    }
-  }
-  etatPrecedentBoutonVal = etatActuelBouton;
 }
